@@ -1,0 +1,47 @@
+# Git & VCS
+.git/
+.gitignore
+
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments & local packaging
+.venv/
+env/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Environment configs & secrets
+.env
+.env.*
+!.env.example
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local databases, vectors & logs
+*.db
+*.sqlite
+*.sqlite3
+.cache/
+data/
+logs/
+*.log
+
+# Documentation & tests in production image build context
+docs/
+tests/
+examples/

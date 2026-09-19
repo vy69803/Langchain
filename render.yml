@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: langchain-rag-api
+    runtime: docker
+    plan: free
+    region: oregon
+    branch: main
+    dockerfilePath: Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: HOST
+        value: 0.0.0.0
+      - key: APP_ENV
+        value: production
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_DB_URL
+        sync: false
+      - key: LANGSMITH_TRACING
+        value: "true"
+      - key: LANGSMITH_ENDPOINT
+        value: https://api.smith.langchain.com
+      - key: LANGSMITH_API_KEY
+        sync: false
+      - key: LANGSMITH_PROJECT
+        value: "My First App"
