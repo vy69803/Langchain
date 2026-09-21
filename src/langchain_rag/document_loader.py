@@ -56,7 +56,34 @@ DEFAULT_SUPPORTED_EXTENSIONS = {
     ".toml",
     ".cfg",
     ".pdf",
+    ".docx",
+    ".pptx",
+    ".xlsx",
+    ".asciidoc",
+    ".adoc",
 }
+
+# Formats that IBM Docling can parse with layout and table analysis
+DOCLING_SUPPORTED_EXTENSIONS = {
+    ".pdf",
+    ".docx",
+    ".pptx",
+    ".xlsx",
+    ".html",
+    ".htm",
+    ".asciidoc",
+    ".adoc",
+    ".md",
+}
+
+
+def is_docling_available() -> bool:
+    """Check if the Docling library is installed and importable."""
+    try:
+        import docling  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 class DocumentLoader(BaseLoader):
@@ -70,6 +97,8 @@ class DocumentLoader(BaseLoader):
         recursive: bool = True,
         extensions: Sequence[str] | None = None,
         ignore_dirs: set[str] | None = None,
+        use_docling: bool = False,
+        docling_export_format: str = "markdown",
     ) -> None:
         """Initialize the DocumentLoader.
 
@@ -79,12 +108,16 @@ class DocumentLoader(BaseLoader):
             recursive: Whether to scan directories recursively (default: True).
             extensions: Allowed extensions when scanning a directory (e.g. ['.md', '.txt']).
             ignore_dirs: Directory names to ignore during traversal.
+            use_docling: Whether to use IBM Docling for advanced document parsing (default: False).
+            docling_export_format: Export format when using Docling ('markdown' or 'text').
         """
         self.target = str(path_or_url)
         self.encoding = encoding
         self.recursive = recursive
         self.extensions = {ext.lower() for ext in extensions} if extensions else None
         self.ignore_dirs = ignore_dirs if ignore_dirs is not None else DEFAULT_IGNORE_DIRS
+        self.use_docling = use_docling
+        self.docling_export_format = docling_export_format
 
     def lazy_load(self) -> Iterator[Document]:
         """Lazily load documents from the specified target."""
@@ -132,7 +165,12 @@ class DocumentLoader(BaseLoader):
             "file_size": stat.st_size,
         }
 
-        # PDF file support
+        # Docling parser support for rich document formats (tables, layout, OCR)
+        if self.use_docling and suffix in DOCLING_SUPPORTED_EXTENSIONS:
+            yield from self._load_with_docling(file_path, base_metadata)
+            return
+
+        # PDF file support (lightweight fallback via pypdf)
         if suffix == ".pdf":
             yield from self._load_pdf(file_path, base_metadata)
             return
@@ -171,7 +209,47 @@ class DocumentLoader(BaseLoader):
             metadata = dict(base_metadata)
             metadata["page"] = page_idx
             metadata["total_pages"] = total_pages
+            metadata["parser"] = "pypdf"
             yield Document(page_content=text, metadata=metadata)
+
+    def _load_with_docling(self, file_path: Path, base_metadata: dict[str, Any]) -> Iterator[Document]:
+        """Convert documents using IBM Docling for advanced layout, table, and structure preservation.
+
+        Docling natively extracts layout, reading order, and complex tables into clean Markdown.
+        """
+        if not is_docling_available():
+            raise ImportError(
+                f"Docling is required to load '{file_path.name}' with use_docling=True. "
+                "Install it using: uv add docling (or pip install docling)"
+            )
+
+        try:
+            from docling.document_converter import DocumentConverter
+
+            converter = DocumentConverter()
+            result = converter.convert(str(file_path))
+
+            if self.docling_export_format == "markdown":
+                content = result.document.export_to_markdown()
+            else:
+                content = result.document.export_to_text()
+
+            metadata = dict(base_metadata)
+            metadata["parser"] = "docling"
+
+            doc_obj = result.document
+            if hasattr(doc_obj, "pages") and doc_obj.pages:
+                metadata["total_pages"] = len(doc_obj.pages)
+            if hasattr(doc_obj, "tables") and doc_obj.tables:
+                metadata["table_count"] = len(doc_obj.tables)
+            if hasattr(doc_obj, "pictures") and doc_obj.pictures:
+                metadata["picture_count"] = len(doc_obj.pictures)
+
+            yield Document(page_content=content, metadata=metadata)
+        except Exception as e:
+            if isinstance(e, ImportError):
+                raise
+            raise RuntimeError(f"Docling failed to parse document '{file_path}': {e}") from e
 
     def _load_csv(self, file_path: Path, base_metadata: dict[str, Any]) -> Iterator[Document]:
         """Load a CSV file, formatting each row into a structured document."""
@@ -271,9 +349,10 @@ def load_document(
     path_or_url: str | Path,
     *,
     encoding: str = "utf-8",
+    use_docling: bool = False,
 ) -> list[Document]:
     """Load a single document or URL and return a list of Documents."""
-    loader = DocumentLoader(path_or_url, encoding=encoding)
+    loader = DocumentLoader(path_or_url, encoding=encoding, use_docling=use_docling)
     return loader.load()
 
 
@@ -283,6 +362,7 @@ def load_directory(
     recursive: bool = True,
     extensions: Sequence[str] | None = None,
     encoding: str = "utf-8",
+    use_docling: bool = False,
 ) -> list[Document]:
     """Load documents from a directory matching specified extensions."""
     loader = DocumentLoader(
@@ -290,8 +370,14 @@ def load_directory(
         encoding=encoding,
         recursive=recursive,
         extensions=extensions,
+        use_docling=use_docling,
     )
     return loader.load()
+
+
+def load_with_docling(path_or_url: str | Path) -> list[Document]:
+    """Convenience helper to parse a document or URL using Docling."""
+    return load_document(path_or_url, use_docling=True)
 
 
 def load_text(text: str, metadata: dict[str, Any] | None = None) -> Document:

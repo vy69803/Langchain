@@ -29,6 +29,14 @@ dependencies = [
     "uvicorn[standard]>=0.53.0",
 ]
 
+[project.optional-dependencies]
+docling = [
+    "docling>=2.129.0",
+]
+pdf = [
+    "pypdf>=5.0.0",
+]
+
 [project.scripts]
 langchain-rag = "langchain_rag:main"
 

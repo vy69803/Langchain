@@ -7,11 +7,14 @@ if sys.platform == "win32":
 
 from langchain_rag.llm import get_llm
 from langchain_rag.document_loader import (
+    DOCLING_SUPPORTED_EXTENSIONS,
     DocumentLoader,
+    is_docling_available,
     load_directory,
     load_document,
     load_text,
     load_url,
+    load_with_docling,
 )
 from langchain_rag.vector_stores import VectorStore, create_vector_store
 from langchain_rag.rag_pipeline import (
@@ -69,6 +72,16 @@ from langchain_rag.monitoring import (
     MetricsCollector,
     RAGMetricsTracker,
 )
+from langchain_rag.handbook_parser import (
+    HandbookParser,
+    clean_hugo_shortcodes,
+    parse_frontmatter,
+    resolve_handbook_url,
+)
+from langchain_rag.handbook_pipeline import (
+    HandbookIngestionPipeline,
+    sanitize_metadata_for_chroma,
+)
 
 load_dotenv()
 
@@ -96,10 +109,13 @@ __all__ = [
     "get_llm",
     "main",
     "DocumentLoader",
+    "DOCLING_SUPPORTED_EXTENSIONS",
+    "is_docling_available",
     "load_document",
     "load_directory",
     "load_text",
     "load_url",
+    "load_with_docling",
     "VectorStore",
     "create_vector_store",
     "RAGPipeline",
@@ -140,4 +156,10 @@ __all__ = [
     "MetricsCollector",
     "MetricsCallbackHandler",
     "RAGMetricsTracker",
+    "HandbookParser",
+    "clean_hugo_shortcodes",
+    "parse_frontmatter",
+    "resolve_handbook_url",
+    "HandbookIngestionPipeline",
+    "sanitize_metadata_for_chroma",
 ]
