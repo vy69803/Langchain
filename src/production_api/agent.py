@@ -524,8 +524,13 @@ class ProductionAgent:
             if backend == "supabase":
                 from langchain_rag.adapters.storage_adapters import SupabaseVectorAdapter
 
+                db_conn = (
+                    self.settings.database_url
+                    or os.getenv("SUPABASE_DB_URL")
+                    or os.getenv("DATABASE_URL")
+                )
                 supabase_adapter = SupabaseVectorAdapter(
-                    db_url=self.settings.database_url,
+                    db_url=db_conn,
                     table_name=self.settings.supabase_vector_table,
                 )
                 retrieval_k = candidate_k if rerank else top_k
