@@ -211,13 +211,25 @@ def run_hybrid_rag_via_api(api_url: str, query: str) -> Dict[str, Any]:
     import httpx
 
     endpoint = f"{api_url.rstrip('/')}/chat"
-    resp = httpx.post(endpoint, json={"query": query, "session_id": "st-session"}, timeout=60.0)
+    resp = httpx.post(endpoint, json={"message": query, "session_id": "st-session"}, timeout=60.0)
     resp.raise_for_status()
     data = resp.json()
+    sources = data.get("sources", [])
+    citations = []
+    for idx, s in enumerate(sources, 1):
+        meta = s.get("metadata", {}) or {}
+        title = s.get("title") or meta.get("source") or meta.get("filename") or f"Doc #{idx}"
+        content = s.get("content", "")
+        citations.append({
+            "citation": f"[{idx}]",
+            "source": title,
+            "metadata": meta,
+            "content_preview": " ".join(content.split())[:120] + "...",
+        })
     return {
         "final_output": data.get("response", ""),
-        "citations": data.get("citations", []),
-        "retrieved_docs": data.get("retrieved_docs", []),
+        "citations": citations,
+        "retrieved_docs": sources,
         "cached": data.get("cached", False),
         "is_verified": True,
     }
@@ -228,20 +240,28 @@ async def run_hybrid_rag_in_process(query: str) -> Dict[str, Any]:
     from production_api.agent import production_agent
     from production_api.models import ChatRequest
 
-    req = ChatRequest(query=query, session_id="st-cloud-session")
+    req = ChatRequest(message=query, session_id="st-cloud-session")
     resp = await production_agent.process_request(req)
     citations = []
-    for c in resp.citations:
+    sources = getattr(resp, "sources", []) or []
+    for idx, s in enumerate(sources, 1):
+        meta = getattr(s, "metadata", {}) or {}
+        title = getattr(s, "title", None) or meta.get("source") or meta.get("filename") or f"Doc #{idx}"
+        content = getattr(s, "content", "")
         citations.append({
-            "citation": getattr(c, "citation", "[1]"),
-            "source": getattr(c, "source", "Filing"),
-            "metadata": getattr(c, "metadata", {}),
-            "content_preview": getattr(c, "content_preview", ""),
+            "citation": f"[{idx}]",
+            "source": title,
+            "metadata": meta,
+            "content_preview": " ".join(content.split())[:120] + "...",
         })
+    retrieved_docs = [
+        s.model_dump() if hasattr(s, "model_dump") else dict(s)
+        for s in sources
+    ]
     return {
         "final_output": resp.response,
         "citations": citations,
-        "retrieved_docs": [d.model_dump() if hasattr(d, "model_dump") else dict(d) for d in resp.retrieved_docs],
+        "retrieved_docs": retrieved_docs,
         "cached": resp.cached,
         "is_verified": True,
     }
