@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -18,6 +19,23 @@ import streamlit as st
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Ensure repository root and src directory are in sys.path for cloud deployment
+current_dir = Path(__file__).resolve().parent
+src_dir = current_dir / "src"
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
+if str(current_dir) not in sys.path:
+    sys.path.insert(0, str(current_dir))
+
+# Bridge Streamlit Community Cloud secrets into os.environ
+try:
+    if hasattr(st, "secrets"):
+        for k, v in st.secrets.items():
+            if isinstance(v, (str, int, float, bool)):
+                os.environ[k] = str(v)
+except Exception:
+    pass
 
 # Page Configuration
 st.set_page_config(

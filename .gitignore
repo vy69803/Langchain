@@ -15,7 +15,8 @@ wheels/
 !.env.example
 
 # Local databases and indexed data
-data/
+data/*
+!data/financebench_curated_20.json
 
 # Archives and bundles
 kaggle_bundle/
