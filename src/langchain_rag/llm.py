@@ -45,5 +45,7 @@ def get_llm(
         openai_api_base="https://openrouter.ai/api/v1",
         temperature=0,
         default_headers=headers,
+        request_timeout=90,
+        max_retries=1,
         **kwargs,
     )

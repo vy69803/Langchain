@@ -26,13 +26,14 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
 
 # Ensure project root is in sys.path
-project_root = Path(__file__).resolve().parent.parent
+project_root = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "src"))
 
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(dotenv_path=project_root / ".env")
+load_dotenv(find_dotenv(usecwd=True))
 
 
 def get_db_url() -> str:
