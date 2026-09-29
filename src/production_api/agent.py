@@ -215,7 +215,10 @@ class ProductionAgent:
         if self._rag_pipeline is None:
             try:
                 from langchain_rag.rag_pipeline import create_rag_pipeline
-                self._rag_pipeline = create_rag_pipeline(collection_name="production_kb")
+                self._rag_pipeline = create_rag_pipeline(
+                    collection_name=self.settings.chroma_collection,
+                    persist_directory=self.settings.chroma_persist_dir,
+                )
             except Exception as e:
                 logger.warning(f"RAGPipeline initialization deferred: {e}")
                 self._rag_pipeline = None
@@ -493,24 +496,95 @@ class ProductionAgent:
         query = state.get("query", "")
         top_k = state.get("metadata", {}).get("top_k", 4)
         filter_dict = state.get("metadata", {}).get("filter")
+        rerank = state.get("metadata", {}).get("rerank", True)
+        candidate_k = state.get("metadata", {}).get("candidate_k", 30)
+
+        # Auto-detect target company if no explicit filter was provided
+        if not filter_dict:
+            import re
+            known_companies = [
+                "3M", "AMD", "Apple", "Amazon", "Boeing", "Best Buy", "Block", 
+                "Coca-Cola", "Corning", "Costco", "CVS Health", "eBay", "FedEx", 
+                "General Mills", "Intel", "Johnson & Johnson", "JPMorgan", "Kraft Heinz", 
+                "Lockheed Martin", "McDonalds", "Microsoft", "Netflix", "Nike", "Oracle", 
+                "PayPal", "PepsiCo", "Pfizer", "Salesforce", "Ulta Beauty", "Verizon", "Walmart"
+            ]
+            for c_name in known_companies:
+                if re.search(rf"\b{re.escape(c_name)}\b", query, re.IGNORECASE):
+                    filter_dict = {"company": c_name}
+                    logger.info(f"Auto-applied company filter for query: {filter_dict}")
+                    break
 
         retrieved_docs: List[Dict[str, Any]] = []
         citations: List[Dict[str, Any]] = []
         formatted_context = ""
 
         try:
-            if self.rag_pipeline is not None:
-                retrieved = self.rag_pipeline.retrieve(query=query, k=top_k, where=filter_dict)
+            backend = getattr(self.settings, "vector_store_backend", "chroma")
+            if backend == "supabase":
+                from langchain_rag.adapters.storage_adapters import SupabaseVectorAdapter
+
+                supabase_adapter = SupabaseVectorAdapter(
+                    db_url=self.settings.database_url,
+                    table_name=self.settings.supabase_vector_table,
+                )
+                retrieval_k = candidate_k if rerank else top_k
+                retrieved = supabase_adapter.similarity_search(
+                    query=query,
+                    k=retrieval_k,
+                    filter_metadata=filter_dict,
+                )
+                if rerank and retrieved:
+                    try:
+                        from langchain_rag.reranker import get_reranker
+
+                        reranker_engine = get_reranker()
+                        retrieved = reranker_engine.rerank(query=query, documents=retrieved, top_k=top_k)
+                    except Exception as re_err:
+                        logger.warning(f"Reranking fallback in Supabase retrieval: {re_err}")
+                        retrieved = retrieved[:top_k]
+
+                formatted_parts: List[str] = []
+                for idx, r in enumerate(retrieved, start=1):
+                    meta = r.get("metadata", {}) or {}
+                    source_name = meta.get("source") or meta.get("filename") or f"doc_{idx}"
+                    score_val = r.get("rerank_score") if r.get("rerank_score") is not None else r.get("score", 0.0)
+                    doc_item = {
+                        "id": r.get("id", f"doc_{idx}"),
+                        "content": r.get("text", ""),
+                        "source": source_name,
+                        "score": score_val,
+                        "metadata": meta,
+                    }
+                    retrieved_docs.append(doc_item)
+                    citations.append({
+                        "citation": f"[{idx}]",
+                        "source": source_name,
+                        "metadata": meta,
+                        "content_preview": " ".join(r.get("text", "").split())[:120] + "...",
+                    })
+                    formatted_parts.append(f"--- [Source #{idx}: {source_name}] ---\n{r.get('text', '')}")
+                formatted_context = "\n\n".join(formatted_parts) if formatted_parts else "No relevant context found."
+
+            elif self.rag_pipeline is not None:
+                retrieved = self.rag_pipeline.retrieve(
+                    query=query,
+                    k=top_k,
+                    where=filter_dict,
+                    rerank=rerank,
+                    candidate_k=candidate_k,
+                )
                 formatted_context = self.rag_pipeline.format_context(retrieved)
 
                 for idx, r in enumerate(retrieved, start=1):
                     meta = r.get("metadata", {}) or {}
                     source_name = meta.get("source") or meta.get("filename") or f"doc_{idx}"
+                    score_val = r.get("rerank_score") if r.get("rerank_score") is not None else r.get("score") or r.get("distance", 0.0)
                     doc_item = {
                         "id": r.get("id", f"doc_{idx}"),
                         "content": r.get("text", ""),
                         "source": source_name,
-                        "score": r.get("distance", 0.0),
+                        "score": score_val,
                         "metadata": meta,
                     }
                     retrieved_docs.append(doc_item)

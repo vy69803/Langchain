@@ -118,6 +118,8 @@ class SearchRequest(BaseModel):
     top_k: int = Field(default=4, ge=1, le=50, description="Number of results to retrieve")
     score_threshold: Optional[float] = Field(default=None, description="Minimum similarity score filter")
     filter: Optional[Dict[str, Any]] = Field(default=None, description="Metadata filtering criteria")
+    rerank: bool = Field(default=False, description="Whether to apply cross-encoder reranking")
+    candidate_k: int = Field(default=10, ge=1, le=100, description="Number of candidate chunks to fetch before reranking")
 
 
 class SearchResponse(BaseModel):
@@ -174,3 +176,25 @@ class ErrorResponse(BaseModel):
     error: str = Field(..., description="Error summary or machine-readable code")
     detail: Optional[str] = Field(default=None, description="Detailed error description or traceback")
     request_id: Optional[str] = Field(default=None, description="Unique ID for tracing the failed request")
+
+
+# ==========================================
+# 6. Financial Intelligence Agent Models
+# ==========================================
+
+class FinancialAgentQueryRequest(BaseModel):
+    """Request payload for the Multi-Modal GraphRAG Financial Intelligence Agent."""
+    query: str = Field(..., min_length=3, description="Financial research or analytical comparison query")
+    collection_name: Optional[str] = Field(default="financebench", description="ChromaDB collection name")
+    persist_directory: Optional[str] = Field(default="./data/chroma_db", description="Vector persistence directory")
+
+
+class FinancialAgentQueryResponse(BaseModel):
+    """Response payload containing generated analytical report and multi-hop trace."""
+    query: str = Field(..., description="Original user analytical query")
+    report: str = Field(..., description="Synthesized Markdown financial report with citations")
+    target_companies: List[str] = Field(default_factory=list, description="Target companies identified")
+    fiscal_years: List[int] = Field(default_factory=list, description="Fiscal years analyzed")
+    metrics_retrieved: List[str] = Field(default_factory=list, description="Canonical financial metrics resolved")
+    is_verified: bool = Field(default=False, description="Whether claims passed factual verification")
+    iterations: int = Field(default=0, description="Self-correction iterations executed")

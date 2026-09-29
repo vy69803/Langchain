@@ -432,8 +432,10 @@ class HybridSearchEngine:
         rrf_k: int = 60,
         candidate_multiplier: int = 4,
         where: dict[str, Any] | None = None,
+        rerank: bool = False,
+        reranker: Any = None,
     ) -> list[dict[str, Any]]:
-        """Perform Production Hybrid Search combining Dense and Sparse retrievers.
+        """Perform Production Hybrid Search combining Dense and Sparse retrievers with optional Cross-Encoder reranking.
         
         Args:
             query: The user query string.
@@ -445,11 +447,14 @@ class HybridSearchEngine:
             candidate_multiplier: Multiplier to retrieve more candidate chunks from each retriever
                                   before reranking/fusion (default: 4x).
             where: Optional metadata filter dict.
+            rerank: Whether to apply Cross-Encoder reranking to the fused candidate pool.
+            reranker: Optional custom BaseReranker instance.
             
         Returns:
-            List of hybrid-ranked document dicts with full scoring details.
+            List of hybrid-ranked (and optionally reranked) document dicts with full scoring details.
         """
         fetch_k = max(k * candidate_multiplier, 10)
+        fusion_top_k = fetch_k if (rerank or reranker is not None) else k
 
         # 1. Fetch dense candidates
         dense_results = self.search_dense(query, k=fetch_k, where=where)
@@ -458,20 +463,36 @@ class HybridSearchEngine:
         sparse_results = self.search_sparse(query, k=fetch_k, where=where)
 
         if fusion_mode.lower() == "weighted":
-            return self._fuse_weighted(
+            fused = self._fuse_weighted(
                 dense_results=dense_results,
                 sparse_results=sparse_results,
                 alpha=alpha,
-                top_k=k,
+                top_k=fusion_top_k,
             )
         else:
-            return self._fuse_rrf(
+            fused = self._fuse_rrf(
                 dense_results=dense_results,
                 sparse_results=sparse_results,
                 rrf_k=rrf_k,
                 alpha=alpha,
-                top_k=k,
+                top_k=fusion_top_k,
             )
+
+        # 3. Optional second-stage Cross-Encoder reranking
+        if rerank or reranker is not None:
+            active_reranker = reranker
+            if active_reranker is None:
+                try:
+                    from langchain_rag.reranker import get_reranker
+                    active_reranker = get_reranker()
+                except Exception as e:
+                    logger.warning(f"Failed to initialize reranker for hybrid search: {e}")
+                    active_reranker = None
+
+            if active_reranker is not None:
+                return active_reranker.rerank(query=query, documents=fused, top_k=k)
+
+        return fused
 
     def _fuse_rrf(
         self,
@@ -610,6 +631,51 @@ class HybridSearchEngine:
             return self._doc_map[doc_id]["metadata"]
         return self.bm25_index.metadatas.get(doc_id, {})
 
+    def search_expanded(
+        self,
+        query: str,
+        num_queries: int = 3,
+        k: int = 5,
+        alpha: float = 0.5,
+        fusion_mode: str = "rrf",
+        rrf_k: int = 60,
+        expander: Any = None,
+        where: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Perform Multi-Query Expanded Hybrid Search (Dense + Sparse BM25 + Query Expansion).
+
+        Args:
+            query: The user query string.
+            num_queries: Number of query variations to generate.
+            k: Top results to return.
+            alpha: Dense vs sparse weighting.
+            fusion_mode: 'rrf' or 'weighted'.
+            rrf_k: RRF smoothing constant.
+            expander: Optional QueryExpander instance.
+            where: Optional metadata filter dict.
+
+        Returns:
+            List of fused, deduplicated documents.
+        """
+        from langchain_rag.query_expansion import QueryExpander, fuse_multiquery_results
+
+        active_expander = expander or QueryExpander()
+        variations = active_expander.expand_query(query=query, num_queries=num_queries, include_original=True)
+
+        all_results: list[tuple[str, list[dict[str, Any]]]] = []
+        for q in variations:
+            sub_results = self.search(
+                query=q,
+                k=k,
+                alpha=alpha,
+                fusion_mode=fusion_mode,
+                rrf_k=rrf_k,
+                where=where,
+            )
+            all_results.append((q, sub_results))
+
+        return fuse_multiquery_results(all_results, rrf_k=rrf_k, top_k=k)
+
     def as_retriever(
         self,
         k: int = 4,
@@ -623,6 +689,7 @@ class HybridSearchEngine:
             alpha=alpha,
             fusion_mode=fusion_mode,
         )
+
 
 
 class LangChainHybridRetriever(BaseRetriever):

@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     database_url: str = ""
     api_key: str = "dev-key"
+
+    # ChromaDB & Supabase Knowledge Base Configuration
+    vector_store_backend: str = "chroma"  # "chroma" | "supabase"
+    supabase_vector_table: str = "financebench_docs"
+    chroma_persist_dir: str = "./data/chroma_db"
+    chroma_collection: str = "financebench"
     
     model_config = SettingsConfigDict(
         env_file=".env",

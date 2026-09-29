@@ -6,11 +6,14 @@ and generate grounded responses with citations.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any, Sequence
 
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -151,6 +154,10 @@ class RAGPipeline:
         chunk_size: int = 500,
         chunk_overlap: int = 50,
         system_prompt_template: str = DEFAULT_SYSTEM_PROMPT,
+        query_transform: str | None = None,
+        query_expander: Any = None,
+        reranker: Any = None,
+        use_reranker: bool = False,
     ) -> None:
         """Initialize the RAG pipeline.
 
@@ -163,6 +170,10 @@ class RAGPipeline:
             chunk_size: Default chunk size if text_splitter not provided (default: 500).
             chunk_overlap: Default chunk overlap if text_splitter not provided (default: 50).
             system_prompt_template: Template string containing {context} and {question}.
+            query_transform: Optional default transformation ('multi_query', 'rewrite', 'hyde', 'step_back').
+            query_expander: Optional pre-configured QueryExpander instance.
+            reranker: Optional pre-configured BaseReranker instance.
+            use_reranker: Whether to automatically use reranking by default (default: False).
         """
         self.vector_store = vector_store or create_vector_store(
             collection_name=collection_name,
@@ -174,6 +185,10 @@ class RAGPipeline:
         )
         self._llm = llm
         self.system_prompt_template = system_prompt_template
+        self.query_transform = query_transform
+        self._expander = query_expander
+        self._reranker = reranker
+        self.use_reranker = use_reranker
 
     @property
     def llm(self) -> Any:
@@ -184,7 +199,28 @@ class RAGPipeline:
             except Exception as e:
                 # Return None if API key is not configured, allowing retrieval-only mode
                 self._llm = None
-        return self._llm
+            return self._llm
+
+    @property
+    def expander(self) -> Any:
+        """Lazily initialize QueryExpander using current LLM."""
+        if self._expander is None:
+            from langchain_rag.query_expansion import QueryExpander
+            self._expander = QueryExpander(llm=self.llm)
+        return self._expander
+
+    @property
+    def reranker(self) -> Any:
+        """Lazily initialize Reranker if configured or requested."""
+        if self._reranker is None and self.use_reranker:
+            try:
+                from langchain_rag.reranker import get_reranker
+                self._reranker = get_reranker()
+            except Exception as e:
+                logger.warning(f"Could not initialize default reranker: {e}")
+                self._reranker = None
+        return self._reranker
+
 
     def index_documents(
         self,
@@ -258,6 +294,11 @@ class RAGPipeline:
         query: str,
         k: int = 3,
         where: dict[str, Any] | None = None,
+        query_transform: str | None = None,
+        num_queries: int = 3,
+        chat_history: Any = None,
+        rerank: bool | None = None,
+        candidate_k: int = 10,
     ) -> list[dict[str, Any]]:
         """Retrieve the top-k most relevant document chunks for a query.
 
@@ -265,11 +306,113 @@ class RAGPipeline:
             query: The question or search string.
             k: Maximum number of chunks to return.
             where: Optional metadata filter.
+            query_transform: Strategy ('multi_query'/'expand', 'rewrite', 'hyde', 'step_back') or None.
+            num_queries: Number of queries if using 'multi_query'.
+            chat_history: Optional conversation context for 'rewrite'.
+            rerank: Whether to rerank candidates with Cross-Encoder (default: self.use_reranker or if reranker configured).
+            candidate_k: Number of raw candidate chunks to fetch before reranking (default: 10).
 
         Returns:
-            List of result dicts with keys: id, text, metadata, distance.
+            List of result dicts with keys: id, text, metadata, distance/scores.
         """
-        return self.vector_store.query(query_text=query, n_results=k, where=where)
+        should_rerank = rerank if rerank is not None else (self.use_reranker or (self._reranker is not None))
+        fetch_k = max(candidate_k, k) if should_rerank else k
+
+        transform = query_transform if query_transform is not None else self.query_transform
+
+        if transform in ("multi_query", "expand"):
+            from langchain_rag.query_expansion import MultiQueryRetriever
+            mqr = MultiQueryRetriever(retriever=self.vector_store, expander=self.expander, num_queries=num_queries)
+            candidates = mqr.retrieve(query=query, k=fetch_k)
+
+        elif transform == "rewrite":
+            rewritten = self.expander.rewrite_query(query=query, chat_history=chat_history)
+            candidates = self.vector_store.query(query_text=rewritten, n_results=fetch_k, where=where)
+            for r in candidates:
+                r["rewritten_query"] = rewritten
+
+        elif transform == "hyde":
+            from langchain_rag.query_expansion import HyDERetriever
+            hyde = HyDERetriever(vector_retriever=self.vector_store, expander=self.expander)
+            candidates = hyde.retrieve(query=query, k=fetch_k)
+
+        elif transform == "step_back":
+            step_back = self.expander.step_back_query(query=query)
+            from langchain_rag.query_expansion import fuse_multiquery_results
+            res_orig = self.vector_store.query(query_text=query, n_results=fetch_k, where=where)
+            res_step = self.vector_store.query(query_text=step_back, n_results=fetch_k, where=where)
+            candidates = fuse_multiquery_results([(query, res_orig), (step_back, res_step)], top_k=fetch_k)
+
+        else:
+            candidates = self.vector_store.query(query_text=query, n_results=fetch_k, where=where)
+
+        if should_rerank and candidates:
+            active_reranker = self.reranker
+            if active_reranker is None:
+                try:
+                    from langchain_rag.reranker import get_reranker
+                    active_reranker = get_reranker()
+                    self._reranker = active_reranker
+                except Exception as e:
+                    logger.warning(f"Could not load reranker: {e}. Falling back to unranked candidates.")
+                    active_reranker = None
+
+            if active_reranker is not None:
+                return active_reranker.rerank(query=query, documents=candidates, top_k=k)
+
+        return candidates[:k]
+
+    def retrieve_reranked(
+        self,
+        query: str,
+        candidate_k: int = 10,
+        top_k: int = 3,
+        where: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve candidate_k raw chunks from ChromaDB, rerank with Cross-Encoder (FlashRank), and return top_k chunks.
+
+        Args:
+            query: The user query string.
+            candidate_k: Number of raw candidate chunks to fetch from vector store (default: 10).
+            top_k: Number of top reranked chunks to return (default: 3).
+            where: Optional metadata filter.
+
+        Returns:
+            Top_k chunks scored and reordered by the Cross-Encoder.
+        """
+        return self.retrieve(
+            query=query,
+            k=top_k,
+            where=where,
+            rerank=True,
+            candidate_k=candidate_k,
+        )
+
+    def retrieve_expanded(
+        self,
+        query: str,
+        k: int = 3,
+        num_queries: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Retrieve using Multi-Query expansion fused with RRF."""
+        return self.retrieve(query=query, k=k, query_transform="multi_query", num_queries=num_queries)
+
+    def retrieve_rewritten(
+        self,
+        query: str,
+        k: int = 3,
+        chat_history: Any = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve after rewriting the query to be standalone and keyword-dense."""
+        return self.retrieve(query=query, k=k, query_transform="rewrite", chat_history=chat_history)
+
+    def retrieve_hyde(
+        self,
+        query: str,
+        k: int = 3,
+    ) -> list[dict[str, Any]]:
+        """Retrieve using a generated hypothetical document embedding."""
+        return self.retrieve(query=query, k=k, query_transform="hyde")
 
     def format_context(self, retrieved_chunks: list[dict[str, Any]]) -> str:
         """Format retrieved chunks into a clean context string for the prompt."""
@@ -280,7 +423,10 @@ class RAGPipeline:
         for idx, item in enumerate(retrieved_chunks, start=1):
             source = item.get("metadata", {}).get("source", "unknown source") if item.get("metadata") else "unknown"
             text = item.get("text", "").strip()
-            formatted_parts.append(f"--- Document Chunk #{idx} [Source: {source}] ---\n{text}")
+            score_info = ""
+            if item.get("rerank_score") is not None:
+                score_info = f" [Rerank Score: {item['rerank_score']:.4f}]"
+            formatted_parts.append(f"--- Document Chunk #{idx} [Source: {source}]{score_info} ---\n{text}")
 
         return "\n\n".join(formatted_parts)
 
@@ -293,6 +439,11 @@ class RAGPipeline:
         question: str,
         k: int = 3,
         where: dict[str, Any] | None = None,
+        query_transform: str | None = None,
+        num_queries: int = 3,
+        chat_history: Any = None,
+        rerank: bool | None = None,
+        candidate_k: int = 10,
     ) -> dict[str, Any]:
         """Run the full RAG query: retrieve context and generate answer.
 
@@ -300,11 +451,25 @@ class RAGPipeline:
             question: The user query.
             k: Number of context chunks to retrieve.
             where: Optional metadata filter.
+            query_transform: Optional transformation ('multi_query', 'rewrite', 'hyde', 'step_back').
+            num_queries: Number of query variations for multi_query.
+            chat_history: Optional conversation history for query rewriting.
+            rerank: Whether to rerank candidates using Cross-Encoder.
+            candidate_k: Number of candidate chunks retrieved before reranking (default: 10).
 
         Returns:
             Dict containing 'question', 'answer', 'sources', 'context', and 'raw_results'.
         """
-        retrieved = self.retrieve(query=question, k=k, where=where)
+        retrieved = self.retrieve(
+            query=question,
+            k=k,
+            where=where,
+            query_transform=query_transform,
+            num_queries=num_queries,
+            chat_history=chat_history,
+            rerank=rerank,
+            candidate_k=candidate_k,
+        )
         context = self.format_context(retrieved)
         prompt = self.generate_prompt(question=question, context=context)
 
@@ -337,7 +502,55 @@ class RAGPipeline:
             "context": context,
             "retrieved_count": len(retrieved),
             "raw_results": retrieved,
+            "query_transform": query_transform or self.query_transform,
         }
+
+    def query_with_expansion(
+        self,
+        question: str,
+        k: int = 3,
+        num_queries: int = 3,
+        where: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Convenience method to query with Multi-Query expansion and RRF fusion."""
+        return self.query(
+            question=question,
+            k=k,
+            where=where,
+            query_transform="multi_query",
+            num_queries=num_queries,
+        )
+
+    def query_with_rewrite(
+        self,
+        question: str,
+        k: int = 3,
+        chat_history: Any = None,
+        where: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Convenience method to query with query rewriting."""
+        return self.query(
+            question=question,
+            k=k,
+            where=where,
+            query_transform="rewrite",
+            chat_history=chat_history,
+        )
+
+    def query_with_hyde(
+        self,
+        question: str,
+        k: int = 3,
+        where: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Convenience method to query with Hypothetical Document Embeddings (HyDE)."""
+        return self.query(
+            question=question,
+            k=k,
+            where=where,
+            query_transform="hyde",
+        )
+
 
 
     def as_retriever(self, k: int = 3, where: dict[str, Any] | None = None) -> Any:
@@ -444,12 +657,16 @@ def create_rag_pipeline(
     collection_name: str = "rag_knowledge_base",
     persist_directory: str | None = None,
     llm: Any = None,
+    reranker: Any = None,
+    use_reranker: bool = False,
 ) -> RAGPipeline:
     """Create and return a configured RAGPipeline instance."""
     return RAGPipeline(
         collection_name=collection_name,
         persist_directory=persist_directory,
         llm=llm,
+        reranker=reranker,
+        use_reranker=use_reranker,
     )
 
 

@@ -42,6 +42,11 @@ from langchain_rag.hybrid_search import (
     HybridSearchEngine,
     create_hybrid_search_engine,
 )
+from langchain_rag.reranker import (
+    BaseReranker,
+    FlashRankReranker,
+    get_reranker,
+)
 from langchain_rag.cost_optimization import (
     CostTracker,
     ModelTier,
@@ -72,16 +77,39 @@ from langchain_rag.monitoring import (
     MetricsCollector,
     RAGMetricsTracker,
 )
-from langchain_rag.handbook_parser import (
-    HandbookParser,
-    clean_hugo_shortcodes,
-    parse_frontmatter,
-    resolve_handbook_url,
+from langchain_rag.finance_parser import (
+    FinanceBenchParser,
+    detect_has_table,
+    detect_section_header,
+    load_financebench_metadata,
+    load_financebench_qa,
 )
-from langchain_rag.handbook_pipeline import (
-    HandbookIngestionPipeline,
-    sanitize_metadata_for_chroma,
+from langchain_rag.finance_pipeline import (
+    FinanceBenchIngestionPipeline,
 )
+from langchain_rag.query_expansion import (
+    HyDERetriever,
+    MultiQueryRetriever,
+    QueryExpander,
+    create_hyde_retriever,
+    create_multi_query_retriever,
+    create_query_expander,
+    fuse_multiquery_results,
+)
+from langchain_rag.retrieval_metrics import (
+    RetrievalBenchmarkEvaluator,
+    average_precision_at_k,
+    dcg_at_k,
+    evaluate_query_retrieval,
+    hit_rate_at_k,
+    idcg_at_k,
+    mean_reciprocal_rank,
+    ndcg_at_k,
+    precision_at_k,
+    recall_at_k,
+    reciprocal_rank,
+)
+
 
 load_dotenv()
 
@@ -134,6 +162,9 @@ __all__ = [
     "BM25Index",
     "HybridSearchEngine",
     "create_hybrid_search_engine",
+    "BaseReranker",
+    "FlashRankReranker",
+    "get_reranker",
     "CostTracker",
     "ModelTier",
     "PromptCompressor",
@@ -155,11 +186,29 @@ __all__ = [
     "create_cached_embeddings",
     "MetricsCollector",
     "MetricsCallbackHandler",
-    "RAGMetricsTracker",
-    "HandbookParser",
-    "clean_hugo_shortcodes",
-    "parse_frontmatter",
-    "resolve_handbook_url",
-    "HandbookIngestionPipeline",
-    "sanitize_metadata_for_chroma",
+    "FinanceBenchParser",
+    "FinanceBenchIngestionPipeline",
+    "load_financebench_metadata",
+    "load_financebench_qa",
+    "detect_has_table",
+    "detect_section_header",
+    "QueryExpander",
+    "MultiQueryRetriever",
+    "HyDERetriever",
+    "create_query_expander",
+    "create_multi_query_retriever",
+    "create_hyde_retriever",
+    "fuse_multiquery_results",
+    "precision_at_k",
+    "recall_at_k",
+    "hit_rate_at_k",
+    "reciprocal_rank",
+    "mean_reciprocal_rank",
+    "dcg_at_k",
+    "idcg_at_k",
+    "ndcg_at_k",
+    "average_precision_at_k",
+    "evaluate_query_retrieval",
+    "RetrievalBenchmarkEvaluator",
 ]
+

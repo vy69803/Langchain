@@ -272,4 +272,57 @@ if res3.get("revoked"):
 print("Summary:", optimizer.tracker.summary())
 ```
 
+#### 9. Query Expansion, Query Rewriting & HyDE
+Overcome distance-based vector retrieval limitations and conversational ambiguity using query transformation strategies:
+- **Multi-Query Expansion**: Generates $N$ semantic perspectives and fuses hits via Reciprocal Rank Fusion (RRF).
+- **Conversational Query Rewriting**: Strips pleasantries and resolves pronouns/coreferences from chat history.
+- **HyDE (Hypothetical Document Embeddings)**: Generates a hypothetical technical passage to search in dense vector space.
+- **Expanded Hybrid Search**: Combines Multi-Query expansion with ChromaDB (Dense) and BM25 (Sparse).
 
+Run the demonstration:
+```bash
+uv run python examples/06_query_expansion/query_expansion_demo.py
+```
+
+Python usage:
+```python
+from langchain_rag.rag_pipeline import create_rag_pipeline
+from langchain_rag.query_expansion import create_multi_query_retriever, create_query_expander
+
+pipeline = create_rag_pipeline()
+pipeline.index_texts(["GitLab Duo Enterprise costs $39/user/month and provides Code Suggestions."])
+
+# 1. Multi-Query Retrieval with Reciprocal Rank Fusion (RRF)
+results = pipeline.retrieve_expanded("how much is duo enterprise?", k=2, num_queries=3)
+
+# 2. Query Rewriting with Chat History Context
+chat_history = [{"role": "user", "content": "Tell me about GitLab Duo Enterprise."}]
+rewritten_results = pipeline.retrieve_rewritten("How much is it?", chat_history=chat_history)
+
+# 3. Hypothetical Document Embeddings (HyDE)
+hyde_results = pipeline.retrieve_hyde("pricing structure for AI features", k=2)
+
+# 4. Multi-Query Hybrid Search (ChromaDB + BM25 + Query Expansion)
+from langchain_rag.hybrid_search import create_hybrid_search_engine
+
+engine = create_hybrid_search_engine()
+engine.add_texts(["Error ERR-9021-TOKEN-REVOKED: Token invalidated by admin."])
+hits = engine.search_expanded("fix invalid login token", num_queries=3, k=2)
+```
+
+#### 10. FinanceBench SEC Filings (Financial & Multimodal RAG)
+The repository integrates the **Patronus AI FinanceBench** dataset:
+- **368 SEC Filings (PDF)**: 10-K, 10-Q, 8-K filings from 40 companies (3M, Amazon, Apple, Microsoft, etc.) with dense balance sheets, cash flows, and footnotes.
+- **150 Gold-Standard QA pairs**: Ground-truth answers, justifications, and evidence page references.
+- **Financial Table & Structure Awareness**: Statement section recognition, numerical table heuristics, and contextual breadcrumbs.
+- **Dual-Indexing & Reranking**: ChromaDB dense vector search + Okapi BM25 sparse search + FlashRank cross-encoder reranking.
+
+```bash
+# Ingest 3M SEC filings into ChromaDB and BM25 index:
+python scripts/ingest_financebench.py --company 3M --query "What is 3M capital expenditure in 2018?"
+
+# Run retrieval accuracy benchmark (Doc Hit@K, Page Hit@K, MRR):
+python scripts/evaluate_financebench.py --sample 10 --search-type hybrid --rerank
+```
+
+See [docs/FINANCEBENCH.md](docs/FINANCEBENCH.md) for full architecture details.

@@ -1,6 +1,10 @@
 import os
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
+
+try:
+    from langchain_openai import ChatOpenAI
+except ImportError:
+    ChatOpenAI = None
 
 load_dotenv()
 
@@ -9,7 +13,7 @@ def get_llm(
     model: str = "thinkingmachines/inkling:free",
     temperature: float = 0.7,
     **kwargs,
-) -> ChatOpenAI:
+):
     """Initialize and return the Thinking Machines model via OpenRouter.
 
     Args:

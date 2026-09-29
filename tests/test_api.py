@@ -105,3 +105,20 @@ async def test_cache_endpoints():
         clear_resp = await client.post("/cache/clear")
         assert clear_resp.status_code == 200
         assert clear_resp.json()["status"] == "success"
+
+
+@pytest.mark.asyncio
+async def test_financial_agent_query_endpoint():
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        payload = {
+            "query": "Compare Apple R&D spending efficiency from 2021 to 2023",
+        }
+        response = await client.post("/api/v1/financial-agent/query", json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        assert "query" in data
+        assert "report" in data
+        assert "target_companies" in data
+        assert any("apple" in c.lower() or "aapl" in c.lower() for c in data["target_companies"])
+        assert len(data["report"]) > 0

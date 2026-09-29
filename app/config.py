@@ -26,6 +26,13 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     database_url: str = ""
     api_key: str = "dev-key"
+
+    # Reranker / Two-Stage Retrieval
+    enable_reranker: bool = True
+    reranker_candidate_k: int = 15
+    reranker_top_k: int = 5
+    reranker_model: str = "ms-marco-MiniLM-L-12-v2"
+    reranker_score_threshold: float = 0.15
     
     model_config = SettingsConfigDict(
         env_file=".env",

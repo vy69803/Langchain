@@ -10,13 +10,17 @@ requires-python = ">=3.14"
 dependencies = [
     "chromadb>=1.5.9",
     "fastapi>=0.141.1",
+    "flashrank>=0.2.10",
     "langchain>=1.4.0",
     "langchain-anthropic>=1.7.2",
+    "langchain-community>=0.4.2",
     "langchain-core>=1.6.3",
     "langchain-experimental>=0.4.2",
+    "langchain-google-vertexai>=3.2.4",
     "langchain-openai>=1.6.2",
     "langchain-postgres>=0.0.18",
     "langchain-text-splitters>=1.1.2",
+    "langfuse>=4.15.4",
     "langgraph>=1.2.11",
     "langsmith>=0.12.4",
     "numpy>=2.5.3",
@@ -25,7 +29,9 @@ dependencies = [
     "psycopg[binary]>=3.3.5",
     "pydantic-settings>=2.15.0",
     "python-dotenv>=1.2.3",
+    "ragas>=0.4.3",
     "slowapi>=0.1.10",
+    "streamlit>=1.64.0",
     "uvicorn[standard]>=0.53.0",
 ]
 
@@ -50,3 +56,16 @@ dev = [
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
 ]
+
+# Override scikit-network with an impossible marker so uv skips the C build.
+# scikit-network is only needed for RAGAS graph-clustering metrics, NOT for
+# faithfulness or answer_relevancy which are the metrics we use.
+[tool.uv]
+override-dependencies = [
+    "scikit-network; sys_platform == 'never'",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+

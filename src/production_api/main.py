@@ -51,6 +51,8 @@ from production_api.models import (
     ErrorResponse,
     FeedbackRequest,
     FeedbackResponse,
+    FinancialAgentQueryRequest,
+    FinancialAgentQueryResponse,
     HealthResponse,
     MetricsResponse,
     SearchRequest,
@@ -358,12 +360,14 @@ async def search_endpoint(
             query=payload.query,
             k=payload.top_k,
             where=payload.filter,
+            rerank=payload.rerank,
+            candidate_k=payload.candidate_k,
         )
 
         results: List[SourceDocument] = []
         for idx, item in enumerate(retrieved, start=1):
             meta = item.get("metadata", {}) or {}
-            score = item.get("distance")
+            score = item.get("rerank_score") if item.get("rerank_score") is not None else item.get("score") or item.get("distance")
             if payload.score_threshold is not None and score is not None:
                 if score > payload.score_threshold:
                     continue
@@ -517,6 +521,50 @@ async def clear_cache():
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to clear cache: {str(e)}",
+        )
+
+
+# ============================================================================
+# 6. Financial Intelligence Agent Endpoints
+# ============================================================================
+
+@app.post(
+    "/api/v1/financial-agent/query",
+    response_model=FinancialAgentQueryResponse,
+    tags=["Financial Intelligence Agent"],
+    summary="Execute GraphRAG Multi-Modal Financial Intelligence Agent",
+)
+@limiter.limit("30/minute")
+async def financial_agent_query(
+    request: Request,
+    payload: FinancialAgentQueryRequest,
+):
+    """Execute multi-hop analytical reasoning across SEC filings with Knowledge Graph & Vector RAG."""
+    try:
+        from langchain_rag.agent.graph_agent import FinancialIntelligenceAgent
+        from langchain_rag.adapters.storage_adapters import ChromaVectorAdapter
+
+        vector_adapter = ChromaVectorAdapter(
+            collection_name=payload.collection_name or "financebench",
+            persist_directory=payload.persist_directory or "./data/chroma_db",
+        )
+        agent = FinancialIntelligenceAgent(vector_adapter=vector_adapter)
+        res = await agent.ainvoke(payload.query)
+
+        return FinancialAgentQueryResponse(
+            query=payload.query,
+            report=res.get("final_output", ""),
+            target_companies=res.get("target_companies", []),
+            fiscal_years=res.get("fiscal_years", []),
+            metrics_retrieved=res.get("required_metrics", []),
+            is_verified=res.get("is_verified", False),
+            iterations=res.get("iteration_count", 0),
+        )
+    except Exception as e:
+        logger.error(f"Error executing financial agent query: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Financial agent execution failed: {str(e)}",
         )
 
 
