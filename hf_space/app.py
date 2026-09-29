@@ -1,16 +1,43 @@
-"""Hugging Face Spaces Streamlit App for Financial Intelligence Agent."""
+"""Streamlit Frontend for Multi-Modal GraphRAG Financial Intelligence Agent.
+
+Supports both direct agent execution and connection to the Production FastAPI service.
+Optimized for local execution and deployment to Hugging Face Spaces.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
 
-# Configure Page
+load_dotenv()
+
+# Ensure repository root and src directory are in sys.path for cloud deployment
+current_dir = Path(__file__).resolve().parent
+src_dir = current_dir / "src"
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
+if str(current_dir) not in sys.path:
+    sys.path.insert(0, str(current_dir))
+
+# Bridge Streamlit Community Cloud secrets into os.environ
+try:
+    if hasattr(st, "secrets"):
+        for k, v in st.secrets.items():
+            if isinstance(v, (str, int, float, bool)):
+                os.environ[k] = str(v)
+except Exception:
+    pass
+
+# Page Configuration
 st.set_page_config(
     page_title="Financial Intelligence Agent | GraphRAG",
     page_icon="🏛️",
@@ -22,11 +49,14 @@ st.set_page_config(
 st.markdown(
     """
     <style>
+    /* Global Styling */
     .stApp {
         background-color: #0c1017;
         color: #f0f6fc;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     }
+    
+    /* Header Gradient */
     .main-title {
         font-size: 2.2rem;
         font-weight: 700;
@@ -40,6 +70,8 @@ st.markdown(
         font-size: 1.05rem;
         margin-bottom: 1.5rem;
     }
+
+    /* Metric Cards */
     .metric-card {
         background: rgba(22, 27, 34, 0.85);
         border: 1px solid #30363d;
@@ -60,6 +92,8 @@ st.markdown(
         font-weight: 600;
         color: #58a6ff;
     }
+
+    /* Badge Tags */
     .badge-verified {
         display: inline-block;
         background-color: rgba(46, 160, 67, 0.15);
@@ -80,6 +114,8 @@ st.markdown(
         font-size: 0.8rem;
         font-weight: 600;
     }
+
+    /* Report Box */
     .report-container {
         background: #161b22;
         border: 1px solid #30363d;
@@ -87,6 +123,8 @@ st.markdown(
         padding: 1.5rem;
         line-height: 1.6;
     }
+    
+    /* Table styling */
     table {
         width: 100%;
         border-collapse: collapse;
@@ -111,10 +149,6 @@ st.markdown(
 def load_benchmark_questions() -> List[Dict[str, Any]]:
     """Load the curated 20-question FinanceBench dataset."""
     benchmark_path = Path(__file__).parent / "data" / "financebench_curated_20.json"
-    if not benchmark_path.exists():
-        # Fallback to parent data directory if running from repo root
-        benchmark_path = Path(__file__).parent.parent / "data" / "financebench_curated_20.json"
-
     if benchmark_path.exists():
         try:
             with open(benchmark_path, "r", encoding="utf-8") as f:
@@ -124,43 +158,114 @@ def load_benchmark_questions() -> List[Dict[str, Any]]:
     return []
 
 
-def query_backend_api(api_url: str, endpoint: str, payload: Dict[str, Any], timeout: float = 90.0) -> Dict[str, Any]:
-    """Execute an analytical query against the FastAPI backend."""
+# --- Engine Invocation Helpers ---
+async def run_agent_in_process(query: str) -> Dict[str, Any]:
+    """Execute the LangGraph Agent directly in-process."""
+    from langchain_rag.adapters.storage_adapters import ChromaVectorAdapter, Neo4jGraphAdapter, SupabaseVectorAdapter
+    from langchain_rag.agent.graph_agent import FinancialIntelligenceAgent
+
+    # Determine vector backend
+    backend = os.getenv("VECTOR_STORE_BACKEND", "chroma").lower()
+    vector_adapter = None
+    if backend == "supabase" or os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL"):
+        try:
+            vector_adapter = SupabaseVectorAdapter(
+                table_name=os.getenv("SUPABASE_VECTOR_TABLE", "financebench_docs")
+            )
+        except Exception as e:
+            st.sidebar.warning(f"Supabase init fallback to Chroma: {e}")
+
+    if vector_adapter is None:
+        chroma_dir = os.getenv("CHROMA_PERSIST_DIR", "./data/chroma_db")
+        if os.path.exists(chroma_dir):
+            vector_adapter = ChromaVectorAdapter(collection_name="financebench", persist_directory=chroma_dir)
+
+    graph_adapter = Neo4jGraphAdapter()
+    agent = FinancialIntelligenceAgent(graph_adapter=graph_adapter, vector_adapter=vector_adapter)
+    return await agent.ainvoke(query)
+
+
+def run_agent_via_api(api_url: str, query: str) -> Dict[str, Any]:
+    """Execute the agent via FastAPI HTTP endpoint."""
     import httpx
 
-    full_url = f"{api_url.rstrip('/')}{endpoint}"
-    resp = httpx.post(full_url, json=payload, timeout=timeout)
+    endpoint = f"{api_url.rstrip('/')}/api/v1/financial-agent/query"
+    resp = httpx.post(endpoint, json={"query": query}, timeout=90.0)
     resp.raise_for_status()
-    return resp.json()
+    data = resp.json()
+    return {
+        "final_output": data.get("report", ""),
+        "target_companies": data.get("target_companies", []),
+        "fiscal_years": data.get("fiscal_years", []),
+        "required_metrics": data.get("metrics_retrieved", []),
+        "is_verified": data.get("is_verified", False),
+        "iteration_count": data.get("iteration_count", 0),
+        "cypher_results": [{"metric": m} for m in data.get("metrics_retrieved", [])],
+        "vector_chunks": [{"id": f"chunk_{i}"} for i in range(data.get("vector_chunks_count", 0))],
+        "retrieval_fallback_triggered": data.get("fallback_triggered", False),
+    }
+
+
+def run_hybrid_rag_via_api(api_url: str, query: str) -> Dict[str, Any]:
+    """Execute the conversational RAG endpoint."""
+    import httpx
+
+    endpoint = f"{api_url.rstrip('/')}/chat"
+    resp = httpx.post(endpoint, json={"query": query, "session_id": "st-session"}, timeout=60.0)
+    resp.raise_for_status()
+    data = resp.json()
+    return {
+        "final_output": data.get("response", ""),
+        "citations": data.get("citations", []),
+        "retrieved_docs": data.get("retrieved_docs", []),
+        "cached": data.get("cached", False),
+        "is_verified": True,
+    }
+
+
+async def run_hybrid_rag_in_process(query: str) -> Dict[str, Any]:
+    """Execute conversational RAG in-process without an external server."""
+    from production_api.agent import production_agent
+    from production_api.models import ChatRequest
+
+    req = ChatRequest(query=query, session_id="st-cloud-session")
+    resp = await production_agent.process_request(req)
+    citations = []
+    for c in resp.citations:
+        citations.append({
+            "citation": getattr(c, "citation", "[1]"),
+            "source": getattr(c, "source", "Filing"),
+            "metadata": getattr(c, "metadata", {}),
+            "content_preview": getattr(c, "content_preview", ""),
+        })
+    return {
+        "final_output": resp.response,
+        "citations": citations,
+        "retrieved_docs": [d.model_dump() if hasattr(d, "model_dump") else dict(d) for d in resp.retrieved_docs],
+        "cached": resp.cached,
+        "is_verified": True,
+    }
 
 
 # ============================================================================
-# Sidebar Configuration & Grounded Benchmark Loader
+# Sidebar Configuration & Benchmark Selector
 # ============================================================================
 st.sidebar.markdown("### 🏛️ System Architecture")
 
-# Detect Cloud Services from Space Secrets
+# Cloud Status Indicators
 neo4j_uri = os.getenv("NEO4J_URI", "")
-supabase_url = os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL", "")
-openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
-
-if neo4j_uri:
-    st.sidebar.success("🟢 Neo4j AuraDB (Cloud KG Connected)")
+neo4j_online = bool(neo4j_uri and "databases.neo4j.io" in neo4j_uri)
+if neo4j_online:
+    st.sidebar.success("🟢 Neo4j AuraDB (Cloud KG Live)")
 else:
-    st.sidebar.info("⚪ Neo4j Secret Standby")
+    st.sidebar.info("⚪ Neo4j Local / Standby")
 
-if supabase_url:
-    st.sidebar.success("🟢 Supabase pgvector (Cloud)")
-else:
-    st.sidebar.info("⚪ Supabase Secret Standby")
-
-if openrouter_key:
-    st.sidebar.success("🟢 OpenRouter LLM Active")
-else:
-    st.sidebar.info("⚪ OpenRouter Key Standby")
+backend_env = os.getenv("VECTOR_STORE_BACKEND", "supabase" if (os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL")) else "chroma").upper()
+st.sidebar.success(f"🟢 Vector Store ({backend_env} Mode)")
+st.sidebar.success("🟢 OpenRouter LLM Harness")
 
 st.sidebar.markdown("---")
-st.sidebar.markdown("### ⚙️ Engine Mode")
+st.sidebar.markdown("### ⚙️ Execution Mode")
 exec_mode = st.sidebar.radio(
     "Select Engine:",
     options=[
@@ -170,11 +275,12 @@ exec_mode = st.sidebar.radio(
     index=0,
 )
 
-api_url_default = os.getenv("API_URL", "http://127.0.0.1:8000")
+api_url_default = os.getenv("API_URL", "")
 api_url_input = st.sidebar.text_input(
-    "Backend API URL:",
+    "FastAPI Base URL (optional):",
     value=api_url_default,
-    help="URL of your running FastAPI service (e.g. Railway, GCP, or Local Tunnel).",
+    placeholder="e.g. https://my-api.com (empty = Direct Cloud Engine)",
+    help="Leave empty to run in-process directly connecting to cloud stores, or enter an external FastAPI URL.",
 )
 
 # Benchmark Curation Loader
@@ -193,7 +299,7 @@ if benchmark_data:
         else [q for q in benchmark_data if q.get("category") == selected_cat]
     )
 
-    q_options = [f"[{q['id']}] {q['company']}: {q['question'][:65]}..." for q in filtered_qs]
+    q_options = [f"[{q['id']}] {q['company']} ({q.get('doc_name', '').split('_')[-1]}): {q['question'][:65]}..." for q in filtered_qs]
     selected_idx = st.sidebar.selectbox("Select Grounded Query:", range(len(q_options)), format_func=lambda i: q_options[i])
     selected_q = filtered_qs[selected_idx]
 
@@ -202,8 +308,9 @@ if benchmark_data:
         st.session_state["selected_benchmark"] = selected_q
 
 st.sidebar.markdown("---")
-st.sidebar.caption("FinanceBench Multi-Modal GraphRAG • Hugging Face Space Edition")
-
+st.sidebar.caption(
+    "Antigravity Multi-Modal Financial Intelligence Agent • SEC Form 10-K/10-Q GraphRAG"
+)
 
 # ============================================================================
 # Main Dashboard
@@ -214,6 +321,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Query Input Area
 default_prompt = st.session_state.get(
     "query_input",
     "What is the FY2018 capital expenditure amount (in USD millions) for 3M? Rely on the cash flow statement.",
@@ -227,7 +335,7 @@ with st.container():
         placeholder="e.g. Compare Apple's R&D intensity between FY2021 and FY2023.",
     )
 
-col_run, col_clear, _ = st.columns([1.5, 1, 6])
+col_run, col_clear, col_status = st.columns([1.5, 1, 6])
 run_clicked = col_run.button("🚀 Run Analysis", type="primary", use_container_width=True)
 if col_clear.button("Clear", use_container_width=True):
     st.session_state["query_input"] = ""
@@ -240,51 +348,46 @@ if run_clicked and user_query.strip():
         result: Dict[str, Any] = {}
         error_msg = None
 
-        try:
-            if "LangGraph Agent" in exec_mode:
-                raw_res = query_backend_api(
-                    api_url_input,
-                    "/api/v1/financial-agent/query",
-                    {"query": user_query},
-                    timeout=100.0,
-                )
-                result = {
-                    "final_output": raw_res.get("report", ""),
-                    "target_companies": raw_res.get("target_companies", []),
-                    "fiscal_years": raw_res.get("fiscal_years", []),
-                    "required_metrics": raw_res.get("metrics_retrieved", []),
-                    "is_verified": raw_res.get("is_verified", False),
-                    "iteration_count": raw_res.get("iteration_count", 0),
-                    "cypher_results": [{"metric": m} for m in raw_res.get("metrics_retrieved", [])],
-                    "vector_chunks": [{"id": f"chunk_{i}"} for i in range(raw_res.get("vector_chunks_count", 0))],
-                    "retrieval_fallback_triggered": raw_res.get("fallback_triggered", False),
-                }
-            else:
-                raw_res = query_backend_api(
-                    api_url_input,
-                    "/chat",
-                    {"query": user_query, "session_id": "hf-space-user"},
-                    timeout=60.0,
-                )
-                result = {
-                    "final_output": raw_res.get("response", ""),
-                    "citations": raw_res.get("citations", []),
-                    "retrieved_docs": raw_res.get("retrieved_docs", []),
-                    "cached": raw_res.get("cached", False),
-                    "is_verified": True,
-                }
-        except Exception as ex:
-            error_msg = f"Backend Connection Error: {str(ex)}. Please ensure your FastAPI backend is running and accessible."
+        if "LangGraph Agent" in exec_mode:
+            used_api = False
+            if api_url_input.strip():
+                try:
+                    result = run_agent_via_api(api_url_input.strip(), user_query)
+                    used_api = True
+                except Exception as api_err:
+                    st.info(f"External API unreachable ({api_err}). Executing in-process cloud agent...")
+            
+            if not used_api:
+                try:
+                    result = asyncio.run(run_agent_in_process(user_query))
+                except Exception as ex:
+                    error_msg = str(ex)
+        else:
+            # Hybrid RAG mode
+            used_api = False
+            if api_url_input.strip():
+                try:
+                    result = run_hybrid_rag_via_api(api_url_input.strip(), user_query)
+                    used_api = True
+                except Exception as api_err:
+                    st.info(f"External API unreachable ({api_err}). Executing in-process Hybrid RAG...")
+            
+            if not used_api:
+                try:
+                    result = asyncio.run(run_hybrid_rag_in_process(user_query))
+                except Exception as ex:
+                    error_msg = str(ex)
 
     latency = round(time.perf_counter() - start_time, 2)
 
     if error_msg:
-        st.error(error_msg)
+        st.error(f"Execution Error: {error_msg}")
     else:
+        # Save last result in session state
         st.session_state["last_result"] = result
         st.session_state["last_latency"] = latency
 
-# Render Output View
+# Render Output if available
 if "last_result" in st.session_state:
     res = st.session_state["last_result"]
     lat = st.session_state.get("last_latency", 0.0)
@@ -317,7 +420,7 @@ if "last_result" in st.session_state:
         )
     with m_col5:
         st.markdown(
-            f'<div class="metric-card"><div class="metric-title">Latency</div><div class="metric-value">{lat}s</div></div>',
+            f'<div class="metric-card"><div class="metric-title">End-to-End Latency</div><div class="metric-value">{lat}s</div></div>',
             unsafe_allow_html=True,
         )
 
@@ -336,7 +439,7 @@ if "last_result" in st.session_state:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Detail Tabs
+    # Tabbed Detail View
     tab_report, tab_evidence, tab_benchmark = st.tabs(
         ["📋 Executive Report", "🔍 Retrieved Evidence & Citations", "🎯 Benchmark Ground Truth"]
     )
@@ -366,7 +469,7 @@ if "last_result" in st.session_state:
                 doc = meta.get("doc_name", "SEC Document")
                 page = meta.get("page", "N/A")
                 score = round(chunk.get("score", 0.0), 3)
-                with st.expander(f"Chunk #{i}: {doc} — Page {page}"):
+                with st.expander(f"Chunk #{i}: {doc} — Page {page} (Similarity Score: {score})"):
                     st.text(chunk.get("text", ""))
 
     with tab_benchmark:

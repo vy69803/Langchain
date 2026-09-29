@@ -223,6 +223,30 @@ def run_hybrid_rag_via_api(api_url: str, query: str) -> Dict[str, Any]:
     }
 
 
+async def run_hybrid_rag_in_process(query: str) -> Dict[str, Any]:
+    """Execute conversational RAG in-process without an external server."""
+    from production_api.agent import production_agent
+    from production_api.models import ChatRequest
+
+    req = ChatRequest(query=query, session_id="st-cloud-session")
+    resp = await production_agent.process_request(req)
+    citations = []
+    for c in resp.citations:
+        citations.append({
+            "citation": getattr(c, "citation", "[1]"),
+            "source": getattr(c, "source", "Filing"),
+            "metadata": getattr(c, "metadata", {}),
+            "content_preview": getattr(c, "content_preview", ""),
+        })
+    return {
+        "final_output": resp.response,
+        "citations": citations,
+        "retrieved_docs": [d.model_dump() if hasattr(d, "model_dump") else dict(d) for d in resp.retrieved_docs],
+        "cached": resp.cached,
+        "is_verified": True,
+    }
+
+
 # ============================================================================
 # Sidebar Configuration & Benchmark Selector
 # ============================================================================
@@ -236,8 +260,8 @@ if neo4j_online:
 else:
     st.sidebar.info("⚪ Neo4j Local / Standby")
 
-backend_env = os.getenv("VECTOR_STORE_BACKEND", "chroma").upper()
-st.sidebar.success(f"🟢 Vector Store ({backend_env} Online)")
+backend_env = os.getenv("VECTOR_STORE_BACKEND", "supabase" if (os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_URL")) else "chroma").upper()
+st.sidebar.success(f"🟢 Vector Store ({backend_env} Mode)")
 st.sidebar.success("🟢 OpenRouter LLM Harness")
 
 st.sidebar.markdown("---")
@@ -251,10 +275,12 @@ exec_mode = st.sidebar.radio(
     index=0,
 )
 
+api_url_default = os.getenv("API_URL", "")
 api_url_input = st.sidebar.text_input(
     "FastAPI Base URL (optional):",
-    value=os.getenv("API_URL", "http://127.0.0.1:8000"),
-    help="Leave as default if local API is running, or clear to run direct in-process.",
+    value=api_url_default,
+    placeholder="e.g. https://my-api.com (empty = Direct Cloud Engine)",
+    help="Leave empty to run in-process directly connecting to cloud stores, or enter an external FastAPI URL.",
 )
 
 # Benchmark Curation Loader
@@ -323,14 +349,13 @@ if run_clicked and user_query.strip():
         error_msg = None
 
         if "LangGraph Agent" in exec_mode:
-            # Try API first if provided, else fallback to in-process
             used_api = False
-            if api_url_input:
+            if api_url_input.strip():
                 try:
-                    result = run_agent_via_api(api_url_input, user_query)
+                    result = run_agent_via_api(api_url_input.strip(), user_query)
                     used_api = True
                 except Exception as api_err:
-                    st.warning(f"FastAPI connection failed ({api_err}). Running in-process agent...")
+                    st.info(f"External API unreachable ({api_err}). Executing in-process cloud agent...")
             
             if not used_api:
                 try:
@@ -339,13 +364,19 @@ if run_clicked and user_query.strip():
                     error_msg = str(ex)
         else:
             # Hybrid RAG mode
-            if api_url_input:
+            used_api = False
+            if api_url_input.strip():
                 try:
-                    result = run_hybrid_rag_via_api(api_url_input, user_query)
+                    result = run_hybrid_rag_via_api(api_url_input.strip(), user_query)
+                    used_api = True
                 except Exception as api_err:
-                    error_msg = f"API Error: {api_err}"
-            else:
-                error_msg = "Conversational Hybrid RAG requires a running FastAPI backend."
+                    st.info(f"External API unreachable ({api_err}). Executing in-process Hybrid RAG...")
+            
+            if not used_api:
+                try:
+                    result = asyncio.run(run_hybrid_rag_in_process(user_query))
+                except Exception as ex:
+                    error_msg = str(ex)
 
     latency = round(time.perf_counter() - start_time, 2)
 
